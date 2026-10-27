@@ -60,3 +60,8 @@ across both interfaces remain required for complete marketplace qualification.
 
 Retained contract-only tests and green UI builds do not close those interface
 integration gates. No production, release or custody claim follows from them.
+
+Both adapter ABIs expose on-chain order approval, current order status, native
+payout credits and withdrawal. The protocol kind is `KIND_ONCHAIN = 2`. These
+exports support adapter calls; complete browser/provider qualification remains
+a separate gate.

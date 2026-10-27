@@ -17,6 +17,7 @@ export const SELL = 0
 export const BUY = 1
 export const KIND_SINGLE = 0
 export const KIND_BULK = 1
+export const KIND_ONCHAIN = 2
 
 export interface Order {
   trader: Address
@@ -65,9 +66,13 @@ export const exchangeAbi = parseAbi([
   'function buyMany(Input[] sells) payable returns (uint256)',
   'function acceptBid(Input bid, uint256 tokenId)',
   'function cancelOrders(Order[] orders)',
+  'function approveOrders(Order[] orders)',
   'function incrementNonce()',
   'function nonces(address) view returns (uint256)',
+  'function checkOrder(Input input) view returns (uint8 code, uint256 remaining)',
   'function feeBps() view returns (uint256)',
+  'function credits(address) view returns (uint256)',
+  'function withdrawCredits()',
 ])
 
 export const erc20Abi = parseAbi([
