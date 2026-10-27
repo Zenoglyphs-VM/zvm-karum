@@ -8,7 +8,7 @@
 // rather than presenting a sample as the collection.
 import {computed, onMounted, onUnmounted, ref, watch} from 'vue'
 import {useRoute} from 'vue-router'
-import type {Address} from 'viem'
+import {isAddress, type Address} from 'viem'
 import {api, type Activity, type BidRow, type Collection, type Item, type ItemSort, type OrderRow, type Sale} from '../core/api'
 import {explorerUrl, hasMarket} from '../core/endpoint'
 import {wallet} from '../core/wallet'
@@ -35,6 +35,11 @@ import Chip from '@zvm/web/components/Chip.vue'
 
 const route = useRoute()
 const address = computed(() => String(route.params.address))
+let alive = true
+let requestGeneration = 0
+const current = (addr: string, generation: number) =>
+  alive && isAddress(addr) && address.value === addr && requestGeneration === generation
+
 
 const collection = ref<Collection | null>(null)
 const items = ref<Item[]>([])
@@ -73,67 +78,91 @@ const rarity = computed(() => computeRarity(items.value))
 const rarityExact = computed(() => loadedAll.value)
 
 async function loadItems(reset = true) {
+  const addr = address.value, generation = requestGeneration
+  if (!current(addr, generation)) return
   if (reset) {
     items.value = []
     exhausted.value = false
   }
   loadingMore.value = true
   try {
-    // A small collection is loaded whole, whatever the sort, so traits and
-    // ranks are over all of it.
     const all = (collection.value?.items ?? 0) <= WHOLE
     do {
-      const page = await api.items(address.value, {limit: PAGE, offset: items.value.length, sort: sort.value === 'rarity' ? 'id' : sort.value, listed: listedOnly.value ? 1 : 0})
+      const page = await api.items(addr, {limit: PAGE, offset: items.value.length, sort: sort.value === 'rarity' ? 'id' : sort.value, listed: listedOnly.value ? 1 : 0})
+      if (!current(addr, generation)) return
       items.value = [...items.value, ...page]
       if (page.length < PAGE) exhausted.value = true
       if (!all) break
     } while (!exhausted.value && items.value.length < WHOLE)
   } catch (err: any) {
-    error.value = err?.message ?? String(err)
+    if (current(addr, generation)) error.value = err?.message ?? String(err)
   } finally {
-    loadingMore.value = false
+    if (current(addr, generation)) loadingMore.value = false
   }
 }
 
 async function load() {
-  if (!hasMarket.value) return
+  const addr = address.value, generation = ++requestGeneration
+  if (!hasMarket.value || !current(addr, generation)) return
   loading.value = true
   error.value = ''
   try {
-    collection.value = await api.collection(address.value)
+    const next = await api.collection(addr)
+    if (!current(addr, generation)) return
+    collection.value = next
     await loadItems()
-    royalty.value = await royaltyBps(address.value as Address)
+    if (!current(addr, generation)) return
+    const bps = await royaltyBps(addr as Address)
+    if (!current(addr, generation)) return
+    royalty.value = bps
     void loadSide()
   } catch (err: any) {
-    error.value = err?.status === 404 ? 'This node has no collection at that address.' : err?.message ?? String(err)
+    if (current(addr, generation)) error.value = err?.status === 404 ? 'This node has no collection at that address.' : err?.message ?? String(err)
   } finally {
-    loading.value = false
+    if (current(addr, generation)) loading.value = false
   }
 }
 
 async function loadSide() {
+  const addr = address.value, generation = requestGeneration
+  if (!current(addr, generation)) return
   const [l, o] = await Promise.all([
-    api.listings({collection: address.value, sort: 'price', limit: 50}).catch(() => []),
-    api.offers({collection: address.value, collectionOnly: 1, limit: 50}).catch(() => []),
+    api.listings({collection: addr, sort: 'price', limit: 50}).catch(() => []),
+    api.offers({collection: addr, collectionOnly: 1, limit: 50}).catch(() => []),
   ])
+  if (!current(addr, generation)) return
   floorListings.value = l
   offers.value = o
 }
 
 async function loadTab() {
-  if (tab.value === 'activity') {
+  const addr = address.value, generation = requestGeneration, selectedTab = tab.value
+  if (!current(addr, generation)) return
+  if (selectedTab === 'activity') {
     activityLoading.value = true
-    activity.value = await api.collectionActivity(address.value, {limit: 100}).catch(() => [])
+    const next = await api.collectionActivity(addr, {limit: 100}).catch(() => [])
+    if (!current(addr, generation)) return
+    if (tab.value === selectedTab) activity.value = next
     activityLoading.value = false
   }
-  if (tab.value === 'analytics' || tab.value === 'items') sales.value = await api.sales({collection: address.value, limit: 200}).catch(() => [])
+  if (selectedTab === 'analytics' || selectedTab === 'items') {
+    const next = await api.sales({collection: addr, limit: 200}).catch(() => [])
+    if (current(addr, generation) && tab.value === selectedTab) sales.value = next
+  }
 }
 
 async function refresh() {
+  const addr = address.value, generation = requestGeneration
+  if (!current(addr, generation)) return
   try {
-    collection.value = await api.collection(address.value)
+    const next = await api.collection(addr)
+    if (!current(addr, generation)) return
+    collection.value = next
     void loadSide()
-    if (tab.value === 'activity') activity.value = await api.collectionActivity(address.value, {limit: 100})
+    if (tab.value === 'activity') {
+      const nextActivity = await api.collectionActivity(addr, {limit: 100})
+      if (current(addr, generation) && tab.value === 'activity') activity.value = nextActivity
+    }
   } catch {
     /* the next block tries again */
   }
@@ -146,7 +175,11 @@ onMounted(() => {
     if (!market.busy.value) void refresh()
   })
 })
-onUnmounted(() => off?.())
+onUnmounted(() => {
+  alive = false
+  requestGeneration++
+  off?.()
+})
 watch(address, () => void load().then(loadTab))
 watch([sort, listedOnly], () => void loadItems())
 watch(tab, () => void loadTab())
