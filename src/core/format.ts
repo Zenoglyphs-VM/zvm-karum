@@ -4,6 +4,7 @@
 
 import * as base from '@zvm/web/format'
 import {endpoint} from './endpoint'
+import {orderCountdown, type OrderTime} from './order-time'
 
 export {ago, amount, compact, number, percent, plain, short, units, usd, timestamp} from '@zvm/web/format'
 
@@ -47,11 +48,6 @@ export function whole(v: number | null | undefined): string {
 }
 
 /** Seconds to a short countdown: 3d 4h, 5h 12m, 42s. */
-export function until(ts: number | null | undefined): string {
-  if (!ts) return ''
-  const s = Math.max(0, Math.floor(ts - Date.now() / 1000))
-  if (s >= 86400) return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`
-  if (s >= 3600) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
-  if (s >= 60) return `${Math.floor(s / 60)}m ${s % 60}s`
-  return `${s}s`
+export function until(ts: OrderTime | null | undefined): string {
+  return orderCountdown(ts)
 }

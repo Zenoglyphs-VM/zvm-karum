@@ -77,7 +77,7 @@ export interface BestListing {
   price: string
   priceNum: number
   currency: string
-  expiry?: number
+  expiry?: number | string
   seller?: string
   kind?: number
 }
@@ -107,8 +107,8 @@ export interface OrderRow {
   paymentToken: string
   price: string
   priceNum: number
-  listingTime: number
-  expiry: number
+  listingTime: number | string
+  expiry: number | string
   kind: number
   status: string
   code: number
@@ -133,7 +133,7 @@ export interface BidRow {
   priceNum: number
   quantity: number
   filled: number
-  expiry: number
+  expiry: number | string
   status: string
   block: number
   timestamp: number
