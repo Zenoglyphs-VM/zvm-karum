@@ -19,6 +19,12 @@ export interface Call {
   value: bigint
   /** Recheck the selected account and node after asynchronous preparation. */
   guard?: () => void
+  /** Synchronously retain recovery context immediately before a wallet request. */
+  onRequest?: () => void
+  /** Synchronously retain the wallet's exact hash before waiting for execution. */
+  onSubmitted?: (hash: string) => void
+  /** Distinguish failures before dispatch from an uncertain requested outcome. */
+  onFailed?: (error: unknown, requested: boolean) => void
   label: string
 }
 
@@ -87,14 +93,21 @@ export async function runCalls(calls: Call[], update: (steps: Step[]) => void, s
 
   for (const [i, call] of calls.entries()) {
     const step = steps[i]
+    let requested = false
     try {
       call.guard?.()
       step.state = 'signing'
       emit()
       const [gas, fees] = await Promise.all([estimate(from, call), estimateFees(chainId)])
       call.guard?.()
+      if (call.onRequest) {
+        call.onRequest()
+        call.guard?.()
+      }
+      requested = true
       const hash = await signer.sendTransaction({to: call.to, data: call.data, value: call.value, gas, ...fees})
       step.hash = hash
+      call.onSubmitted?.(hash)
       step.state = 'ordered'
       emit()
       record({hash, label: call.label, chainId, at: Date.now(), state: 'ordered'})
@@ -107,6 +120,9 @@ export async function runCalls(calls: Call[], update: (steps: Step[]) => void, s
     } catch (err) {
       step.state = 'failed'
       step.detail = reason(err)
+      try {call.onFailed?.(err, requested)} catch {
+        step.detail += ' The recovery record could not be updated; keep any original transaction hash.'
+      }
       emit()
       if (step.hash) record({hash: step.hash, label: call.label, chainId, at: Date.now(), state: 'failed'})
       return steps

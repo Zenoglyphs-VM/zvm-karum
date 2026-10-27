@@ -29,6 +29,7 @@ import ActivityList from '../components/ActivityList.vue'
 import ListDialog from '../components/ListDialog.vue'
 import StepRail from '../components/StepRail.vue'
 import CollectionPermissions from '../components/CollectionPermissions.vue'
+import ExchangeCredits from '../components/ExchangeCredits.vue'
 import Icon from '../components/Icon.vue'
 import Chip from '@zvm/web/components/Chip.vue'
 
@@ -225,6 +226,8 @@ const images = computed(() =>
     </section>
 
     <p v-if="error" class="text-[13px]" style="color: var(--danger)">{{ error }}</p>
+
+    <ExchangeCredits :owner="address" />
 
     <Tabs v-model="tab" :tabs="tabs" />
 
