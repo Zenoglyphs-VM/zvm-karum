@@ -12,10 +12,11 @@ import {useRouter} from 'vue-router'
 import type {Address} from 'viem'
 import {cart, cartTotals, clearCart, removeFromCart} from '../core/cart'
 import {wallet, askToConnect} from '../core/wallet'
-import {hasMarket} from '../core/endpoint'
+import {endpoint, hasMarket} from '../core/endpoint'
+import {batchMessage, batchResult, type BatchResult} from '../core/batch-result'
 import {isZero, units, usd} from '../core/format'
 import {usdOf} from '../core/prices'
-import {buyManyCall, fetchFillable, tokenApproval} from '../core/orders'
+import {buyManyCall, exchange, fetchFillable, tokenApproval, type Input} from '../core/orders'
 import {useMarket} from '../core/market'
 import {burst} from '../core/burst'
 import {toast} from '../core/toast'
@@ -27,6 +28,7 @@ import Icon from './Icon.vue'
 const router = useRouter()
 const market = useMarket()
 const gone = ref<string[]>([])
+const checkoutResult = ref<BatchResult | null>(null)
 const checkoutBtn = ref<HTMLElement | null>(null)
 
 const totalUsd = computed(() => {
@@ -62,9 +64,25 @@ async function checkout() {
   if (!wallet.address) return askToConnect()
   const buyer = wallet.address as Address
   const names = new Map(cart.items.map((i) => [i.hash, i.name]))
+  checkoutResult.value = null
+  const chainId = endpoint.chainId, node = endpoint.rpc
+  let selectedExchange: Address | null = null
+  let submitted: Input[] = []
+  let nativeSent = 0n
+  const guard = () => {
+    if (wallet.address?.toLowerCase() !== buyer.toLowerCase() || wallet.chainId !== chainId ||
+        endpoint.chainId !== chainId || endpoint.rpc !== node ||
+        exchange()?.address.toLowerCase() !== selectedExchange?.toLowerCase()) {
+      throw new Error('The account or node changed. Review checkout again.')
+    }
+  }
   await market.run(
     async () => {
+      selectedExchange = exchange()?.address ?? null
+      if (!selectedExchange) throw new Error('This node has no exchange deployed.')
+      guard()
       const {inputs, gone: missing} = await fetchFillable(cart.items.map((i) => i.hash))
+      guard()
       gone.value = missing.map((h) => names.get(h) ?? h)
       missing.forEach(removeFromCart)
       if (!inputs.length) throw new Error('Nothing in the cart can still be bought.')
@@ -79,14 +97,21 @@ async function checkout() {
       const approvals = (
         await Promise.all([...byToken.entries()].map(([token, total]) => tokenApproval(token as Address, buyer, total, 'QSR')))
       ).flat()
-      return [...approvals, buyManyCall(inputs, native)]
+      submitted = inputs
+      nativeSent = native
+      guard()
+      return [...approvals, buyManyCall(inputs, native)].map(call => ({...call, guard}))
     },
     {
       after: () => {
-        burst(checkoutBtn.value)
-        const n = cart.items.length
-        clearCart()
-        toast(`Bought ${n} item${n === 1 ? '' : 's'}.`, 'good', {to: `/account/${buyer}`, label: 'See them'})
+        const step = [...market.steps.value].reverse().find(step => step.receipt)
+        if (!selectedExchange || !step?.receipt || step.hash !== step.receipt.transactionHash) throw new Error('The executed checkout receipt is unavailable.')
+        const result = batchResult(step.receipt, selectedExchange, buyer, submitted, nativeSent)
+        checkoutResult.value = result
+        guard()
+        result.purchasedHashes.forEach(removeFromCart)
+        if (result.bought > 0) burst(checkoutBtn.value)
+        toast(batchMessage(result), result.bought > 0 ? 'good' : 'bad', {to: `/account/${buyer}`, label: 'See them'})
       },
     },
   )
@@ -161,6 +186,7 @@ async function checkout() {
           </div>
 
           <div v-if="market.steps.value.length" class="px-4 pb-4"><StepRail :steps="market.steps.value" /></div>
+          <p v-if="checkoutResult" data-batch-outcome role="status" class="px-4 pb-4 text-[12.5px]">{{ batchMessage(checkoutResult) }}</p>
         </div>
 
         <footer v-if="cart.items.length" class="border-t border-line p-4 grid gap-3 bg-surface">

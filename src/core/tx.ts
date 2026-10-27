@@ -7,7 +7,7 @@
 // been ordered, and is waiting to be executed.
 
 import {reactive} from 'vue'
-import type {Address, Hash, Hex} from 'viem'
+import type {Address, Hash, Hex, TransactionReceipt} from 'viem'
 import {estimateFees, publicClient, walletClient} from '@zvm/web/evm'
 import {endpoint} from './endpoint'
 import {wallet} from './wallet'
@@ -35,6 +35,8 @@ export interface Step {
   state: StepState
   hash?: Hash
   detail?: string
+  /** The executed receipt, kept in memory for flow-specific reconciliation. */
+  receipt?: TransactionReceipt
   /** A signature step: it is never ordered or executed, only signed. */
   signature?: boolean
 }
@@ -98,6 +100,7 @@ export async function runCalls(calls: Call[], update: (steps: Step[]) => void, s
       record({hash, label: call.label, chainId, at: Date.now(), state: 'ordered'})
       const r = await client.waitForTransactionReceipt({hash, ...RECEIPT})
       if (r.status !== 'success') throw new Error('The ZVM reverted this transaction.')
+      step.receipt = r
       step.state = 'done'
       emit()
       record({hash, label: call.label, chainId, at: Date.now(), state: 'done'})
