@@ -17,6 +17,8 @@ export interface Call {
   to: Address
   data: Hex
   value: bigint
+  /** Recheck the selected account and node after asynchronous preparation. */
+  guard?: () => void
   label: string
 }
 
@@ -84,9 +86,11 @@ export async function runCalls(calls: Call[], update: (steps: Step[]) => void, s
   for (const [i, call] of calls.entries()) {
     const step = steps[i]
     try {
+      call.guard?.()
       step.state = 'signing'
       emit()
       const [gas, fees] = await Promise.all([estimate(from, call), estimateFees(chainId)])
+      call.guard?.()
       const hash = await signer.sendTransaction({to: call.to, data: call.data, value: call.value, gas, ...fees})
       step.hash = hash
       step.state = 'ordered'
