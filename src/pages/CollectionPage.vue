@@ -103,7 +103,21 @@ async function loadItems(reset = true) {
 
 async function load() {
   const addr = address.value, generation = ++requestGeneration
-  if (!hasMarket.value || !current(addr, generation)) return
+  if (!hasMarket.value || !alive) return
+  if (!isAddress(addr)) {
+    collection.value = null
+    items.value = []
+    floorListings.value = []
+    offers.value = []
+    sales.value = []
+    activity.value = []
+    royalty.value = null
+    loading.value = false
+    loadingMore.value = false
+    activityLoading.value = false
+    error.value = 'Invalid collection address.'
+    return
+  }
   loading.value = true
   error.value = ''
   try {

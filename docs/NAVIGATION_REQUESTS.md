@@ -11,3 +11,10 @@ parameters or replacing its state. The real Chrome/Go HTTP regression checks
 canonical collection-to-item navigation and requires no page HTTP failures.
 Its prior run retained three 400 responses from collection side endpoints.
 This change does not alter order inputs, signing, settlement or API schemas.
+
+An invalid collection route clears prior collection/item/side data, completes
+loading and shows an explicit address error without sending a malformed API
+request. The browser history regression starts on a valid collection, changes
+its address to an invalid value in the same application, checks that the old
+item card is gone, and returns to the valid item. Late responses retain the
+same generation fence.
