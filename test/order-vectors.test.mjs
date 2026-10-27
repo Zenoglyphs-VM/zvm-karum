@@ -24,7 +24,7 @@ async function fixture() {
   const prompts = []
   const forbidden = () => { throw new Error('unexpected network, contract read or API call') }
   const info = {l2: {chainId: vectors.chainId}, apps: {exchange: vectors.exchange, wrappedZnn: zero}}
-  const wallet = {info, evm: {address: vectors.orders[0].order.trader, provider: {}}}
+  const wallet = {info, address: vectors.orders[0].order.trader, provider: {}, evm: {address: vectors.orders[0].order.trader, provider: {}}}
   const endpoint = {info, chainId: vectors.chainId}
   const evm = {publicClient: forbidden, walletClient: () => ({signTypedData: async (request) => {
     prompts.push(request)
@@ -74,7 +74,10 @@ test('three-leaf tree, odd carry and every proof match the Go golden tree', asyn
   assert.equal(tree.root, vectors.bulk.root)
   assert.deepEqual(plain(tree.proofs), vectors.bulk.proofs)
   assert.deepEqual(leaves, before)
-  for (let i = 0; i < leaves.length; i++) assert.equal(f.module.processProof(leaves[i], tree.proofs[i]), vectors.bulk.root)
+  for (let i = 0; i < leaves.length; i++) {
+    const root = tree.proofs[i].reduce((h, sibling) => keccak256(concat(BigInt(h) <= BigInt(sibling) ? [h, sibling] : [sibling, h])), leaves[i])
+    assert.equal(root, vectors.bulk.root)
+  }
 })
 
 test('bulk wallet request uses one prompt and the exact Go root digest', async () => {
@@ -130,14 +133,14 @@ test('a different exchange changes the requested signature digest', async () => 
 test('a missing exchange prevents a wallet prompt', async () => {
   const f = await fixture()
   f.info.apps.exchange = null
-  await assert.rejects(() => f.module.signOrder(f.module.fromWire(vectors.orders[0].order)))
+  await assert.rejects(() => f.module.signOrder(f.module.fromWire(vectors.orders[0].order)), /exchange/i)
   assert.equal(f.prompts.length, 0)
 })
 
 test('native buy call preserves the complete order and exact payment', async () => {
   const f = await fixture(), order = f.module.fromWire(vectors.orders[0].order)
   const input = {order, kind: f.module.KIND_SINGLE, signature, proof: []}
-  const call = f.module.buyCall(vectors.exchange, input, 'Buy fixture')
+  const call = f.module.buyCall(input, 'Buy fixture')
   const decoded = decodeFunctionData({abi: f.module.exchangeAbi, data: call.data})
   assert.equal(call.to, vectors.exchange)
   assert.equal(call.value, order.price)
@@ -150,7 +153,7 @@ test('bulk buy call preserves order sequence, kind, signatures and proofs', asyn
     order: f.module.fromWire(v.order), kind: f.module.KIND_BULK, signature, proof: vectors.bulk.proofs[i],
   }))
   const total = inputs.filter((i) => i.order.paymentToken === zero).reduce((sum, i) => sum + i.order.price, 0n)
-  const call = f.module.buyManyCall(vectors.exchange, inputs, total)
+  const call = f.module.buyManyCall(inputs, total)
   const decoded = decodeFunctionData({abi: f.module.exchangeAbi, data: call.data})
   assert.equal(decoded.functionName, 'buyMany')
   assert.equal(call.value, total)
