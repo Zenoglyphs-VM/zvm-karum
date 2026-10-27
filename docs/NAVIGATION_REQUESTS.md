@@ -18,3 +18,13 @@ request. The browser history regression starts on a valid collection, changes
 its address to an invalid value in the same application, checks that the old
 item card is gone, and returns to the valid item. Late responses retain the
 same generation fence.
+
+The actual 25-check browser revision also exposed a late item-page sibling
+request to `/api/nft/collections/undefined/items`. Item reads now capture both
+collection and token ID with their generation. Sibling pagination and royalty
+metadata stop after navigation or unmount; obsolete results are ignored.
+The block listener is registered synchronously before awaited initialization,
+so unmount can always detach it. Invalid item routes clear old data and settle
+with an explicit error. Token IDs remain strings and valid-route signing and
+settlement code is unchanged. This regression requires zero failed page HTTP
+responses rather than accepting the passing main checks alone.

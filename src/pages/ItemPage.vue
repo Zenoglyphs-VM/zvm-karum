@@ -37,6 +37,11 @@ import Chip from '@zvm/web/components/Chip.vue'
 const route = useRoute()
 const collection = computed(() => String(route.params.collection))
 const tokenId = computed(() => String(route.params.id))
+let alive = true
+let requestGeneration = 0
+const current = (addr: string, id: string, generation: number) =>
+  alive && collection.value === addr && tokenId.value === id && requestGeneration === generation
+
 
 const item = ref<ItemDetail | null>(null)
 const siblings = ref<Item[]>([])
@@ -53,51 +58,88 @@ const buyBtn = ref<HTMLElement | null>(null)
 const market = useMarket()
 
 async function load(quiet = false) {
-  if (!hasMarket.value) return
+  const addr = collection.value, id = tokenId.value, generation = requestGeneration
+  if (!hasMarket.value || !current(addr, id, generation)) return
+  if (!isAddress(addr) || !/^\d+$/.test(id)) {
+    item.value = null
+    siblings.value = []
+    royalty.value = null
+    loading.value = false
+    error.value = 'Invalid item address or token id.'
+    return
+  }
   if (!quiet) loading.value = true
   try {
-    item.value = await api.item(collection.value, tokenId.value)
+    const next = await api.item(addr, id)
+    if (!current(addr, id, generation)) return
+    item.value = next
     error.value = ''
   } catch (err: any) {
-    if (!quiet) error.value = err?.status === 404 ? 'This node has no such item.' : err?.message ?? String(err)
+    if (current(addr, id, generation) && !quiet) error.value = err?.status === 404 ? 'This node has no such item.' : err?.message ?? String(err)
   } finally {
-    loading.value = false
+    if (current(addr, id, generation)) loading.value = false
   }
 }
 
 async function loadSiblings() {
+  const addr = collection.value, id = tokenId.value, generation = requestGeneration
+  if (!current(addr, id, generation) || !isAddress(addr)) return
   const c = item.value?.collectionInfo
   const limit = c && c.items <= 1000 ? 200 : 60
   try {
     let all: Item[] = []
     for (let offset = 0; offset < (c && c.items <= 1000 ? c.items : limit); offset += 200) {
-      const page = await api.items(collection.value, {limit, offset, sort: 'id'})
+      const page = await api.items(addr, {limit, offset, sort: 'id'})
+      if (!current(addr, id, generation)) return
       all = [...all, ...page]
       if (page.length < limit) break
     }
-    siblings.value = all
+    if (current(addr, id, generation)) siblings.value = all
   } catch {
-    siblings.value = []
+    if (current(addr, id, generation)) siblings.value = []
   }
 }
 
-let off: (() => void) | undefined
-onMounted(async () => {
+async function initializeItem() {
+  const addr = collection.value, id = tokenId.value, generation = requestGeneration
   await load()
-  royalty.value = await royaltyBps(collection.value as Address)
-  void loadSiblings()
+  if (!current(addr, id, generation) || !item.value || error.value) return
+  try {
+    const bps = await royaltyBps(addr as Address)
+    if (!current(addr, id, generation)) return
+    royalty.value = bps
+  } catch {
+    if (current(addr, id, generation)) royalty.value = null
+  }
+  if (current(addr, id, generation)) void loadSiblings()
+}
+
+let off: (() => void) | undefined
+onMounted(() => {
+  // Subscribe before awaiting data so unmount can always detach the listener.
   off = onBlock(() => {
-    if (!market.busy.value) void load(true)
+    if (alive && !market.busy.value) {
+      if (item.value) void load(true)
+      else void initializeItem()
+    }
   })
+  void initializeItem()
 })
-onUnmounted(() => off?.())
+onUnmounted(() => {
+  alive = false
+  requestGeneration++
+  off?.()
+})
 watch(
   () => route.fullPath,
-  async () => {
+  () => {
+    if (!alive) return
+    requestGeneration++
     item.value = null
+    siblings.value = []
+    royalty.value = null
     market.reset()
-    await load()
-    void loadSiblings()
+    void initializeItem()
   },
 )
 
