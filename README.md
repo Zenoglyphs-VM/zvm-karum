@@ -11,6 +11,7 @@ cp .env.example .env
 npm run dev        # http://localhost:47400/zvm-karum/
 npm run build      # dist/
 npm run typecheck
+npm run test:orders # exact wire values and pinned Go order vectors
 npm run verify     # a real trade against a running node, in headless Chrome
 ```
 
@@ -32,3 +33,6 @@ Actions variables. Add `public/CNAME` to serve from a domain's root.
 
 MIT licence. The full guide, with how it works and why:
 [docs/GUIDE.md](docs/GUIDE.md).
+
+Order protocol, frontend responsibilities and remaining integration gates:
+[docs/ORDER_COMPATIBILITY.md](docs/ORDER_COMPATIBILITY.md).
