@@ -540,6 +540,8 @@ async function share() {
       :items="[{collection, collectionName: info?.name, tokenId, name, image: item?.image}]"
       :floor="info?.floor"
       :current="listing ? priceOf(listing.price, listing.currency).replace(/,/g, '') : null"
+      :current-raw="listing?.price ?? null"
+      :current-currency="listing?.currency ?? null"
       @close="listing_ = false"
       @done="load(true)"
     />

@@ -8,13 +8,14 @@
 // is the once-per-collection approval that lets the exchange move the item
 // when it sells, and it is skipped when it is already in place.
 import {computed, ref, watch} from 'vue'
-import {parseUnits, type Address} from 'viem'
+import {type Address} from 'viem'
 import {endpoint} from '../core/endpoint'
+import {listingQuote, quotedAmount, relistingQuote, quoteContextGuard, guardedQuoteCalls} from '../core/order-quote'
 import {wallet} from '../core/wallet'
 import {publicClient} from '@zvm/web/evm'
 import {whole, units, usd} from '../core/format'
 import {usdOf} from '../core/prices'
-import {exchange, exchangeAbi, newOrder, SELL, signOrders, submitOrders} from '../core/orders'
+import {exchange, exchangeAbi, newOrder, orderDuration, SELL, signOrders, submitOrders} from '../core/orders'
 import {approvalFor, royaltyBps, useMarket} from '../core/market'
 import {burst} from '../core/burst'
 import Modal from './Modal.vue'
@@ -23,7 +24,7 @@ import StepRail from './StepRail.vue'
 import Icon from './Icon.vue'
 import type {Listable} from '../core/api'
 
-const props = defineProps<{open: boolean; items: Listable[]; floor?: number | null; current?: string | null}>()
+const props = defineProps<{open: boolean; items: Listable[]; floor?: number | null; current?: string | null; currentRaw?: string | null; currentCurrency?: string | null}>()
 const emit = defineEmits<{(e: 'close'): void; (e: 'done'): void}>()
 
 const market = useMarket()
@@ -53,7 +54,15 @@ watch(
   async (open) => {
     if (!open) return
     market.reset()
+    currency.value = 'znn'
     price.value = props.current ?? ''
+    if (props.currentRaw !== null && props.currentRaw !== undefined) {
+      try {
+        const original = relistingQuote(props.currentRaw, props.currentCurrency, qsr.value)
+        currency.value = original.currency
+        price.value = original.text
+      } catch (err: any) {price.value = ''; market.error.value = err?.message ?? 'Review the original listing price.'}
+    }
     const ex = exchange()
     if (!ex || endpoint.chainId === null) return
     const first = props.items[0]
@@ -68,7 +77,7 @@ watch(
 
 const amount = computed(() => {
   try {
-    const v = parseUnits((price.value || '0').replace(/,/g, ''), decimals.value)
+    const v = quotedAmount(price.value, decimals.value)
     return v > 0n ? v : null
   } catch {
     return null
@@ -91,33 +100,49 @@ function setFloor() {
 }
 
 async function list() {
-  const owner = wallet.address as Address
-  const pay = amount.value
-  if (!owner || pay === null) return
-  const paymentToken = (currency.value === 'qsr' && qsr.value ? qsr.value : '0x0000000000000000000000000000000000000000') as Address
-  const n = props.items.length
-  await market.run(
-    async () => (await Promise.all(collections.value.map((c) => approvalFor(c.collection as Address, owner, c.collectionName || 'this collection')))).flat(),
-    {
-      sign: {
-        label: n === 1 ? `Sign a listing of ${props.items[0].name} for ${price.value} ${symbol.value}` : `Sign one listing for all ${n} items`,
-        run: async () => {
-          const orders = await Promise.all(
-            props.items.map((i) =>
-              newOrder({side: SELL, collection: i.collection as Address, tokenId: BigInt(i.tokenId), price: pay, paymentToken}, days.value),
-            ),
-          )
-          await submitOrders(await signOrders(orders))
-        },
-      },
-      success: n === 1 ? `Listed for ${price.value} ${symbol.value}.` : `Listed ${n} items for ${price.value} ${symbol.value} each.`,
-      after: () => {
-        burst(button.value)
-        emit('done')
-        emit('close')
+  const owner = wallet.address as Address, ex = exchange()
+  if (!owner || !ex || !price.value || market.busy.value) return
+  const draft = {items: props.items.map(item => ({collection: item.collection, tokenId: item.tokenId,
+    name: item.name, collectionName: item.collectionName})), price: price.value, currency: currency.value,
+    days: days.value, rewardToken: qsr.value}
+  if (!draft.items.length) return
+  const keys = (items: {collection: string; tokenId: string}[]) => items.map(item => item.collection.toLowerCase() + ':' + item.tokenId).sort().join(',')
+  const read = () => ({endpoint: endpoint.rpc, chainId: endpoint.chainId, walletChainId: wallet.chainId,
+    owner: wallet.address, signer: wallet.address, provider: wallet.provider, exchange: exchange()?.address,
+    paymentToken: draft.currency === 'qsr' ? qsr.value : '0x0000000000000000000000000000000000000000',
+    selection: props.open ? keys(props.items) : ''})
+  const captured = {...read(), owner, exchange: ex.address,
+    paymentToken: draft.currency === 'qsr' ? draft.rewardToken : '0x0000000000000000000000000000000000000000', selection: keys(draft.items)}
+  const n = draft.items.length
+  let prepared: {quote: ReturnType<typeof listingQuote>; guard: () => void} | null = null
+  await market.run(async () => {
+    const quote = listingQuote(draft.price, draft.currency, draft.rewardToken)
+    orderDuration(draft.days)
+    const guard = quoteContextGuard(read, captured)
+    prepared = {quote, guard}
+    const collections = [...new Map(draft.items.map(item => [item.collection.toLowerCase(), item])).values()]
+    const calls = (await Promise.all(collections.map(item => approvalFor(item.collection as Address, owner, item.collectionName || 'this collection')))).flat()
+    guard()
+    return guardedQuoteCalls(calls, guard)
+  }, {
+    sign: {
+      label: n === 1 ? `Sign a listing of ${draft.items[0].name} for ${draft.price} ${draft.currency.toUpperCase()}` : `Sign one listing for all ${n} items`,
+      run: async () => {
+        if (!prepared) throw new Error('Review the listing before signing.')
+        const {quote, guard} = prepared
+        guard()
+        const orders = await Promise.all(draft.items.map(item => newOrder({side: SELL,
+          collection: item.collection as Address, tokenId: BigInt(item.tokenId), price: quote.amount, paymentToken: quote.paymentToken}, draft.days)))
+        guard()
+        const inputs = await signOrders(orders)
+        guard()
+        await submitOrders(inputs)
+        guard()
       },
     },
-  )
+    success: n === 1 ? `Listed for ${draft.price} ${draft.currency.toUpperCase()}.` : `Listed ${n} items for ${draft.price} ${draft.currency.toUpperCase()} each.`,
+    after: () => {burst(button.value); emit('done'); emit('close')},
+  })
 }
 </script>
 

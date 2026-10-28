@@ -7,14 +7,15 @@
 // shows the offer. So the dialog tops up both first when they are short: wrap
 // the difference, approve the total, then sign.
 import {computed, ref, watch} from 'vue'
-import {parseUnits, type Address} from 'viem'
+import {type Address} from 'viem'
 import {endpoint} from '../core/endpoint'
+import {listingQuote, quotedAmount, quotedCount, quoteTotal, quoteContextGuard, guardedQuoteCalls} from '../core/order-quote'
 import {wallet} from '../core/wallet'
 import {chain} from '../core/chain'
 import {publicClient} from '@zvm/web/evm'
 import {units, usd, whole} from '../core/format'
 import {usdOf} from '../core/prices'
-import {BUY, erc20Abi, exchange, newOrder, offerFunding, signOrder, submitOrders} from '../core/orders'
+import {BUY, erc20Abi, exchange, newOrder, orderDuration, offerFunding, signOrder, submitOrders} from '../core/orders'
 import {useMarket} from '../core/market'
 import Modal from './Modal.vue'
 import NftMedia from './NftMedia.vue'
@@ -75,48 +76,59 @@ watch(() => chain.head, () => props.open && balances())
 
 const each = computed(() => {
   try {
-    const v = parseUnits((price.value || '0').replace(/,/g, ''), 18)
+    const v = quotedAmount(price.value, 18)
     return v > 0n ? v : null
   } catch {
     return null
   }
 })
-const total = computed(() => (each.value === null ? null : each.value * BigInt(Math.max(1, quantity.value))))
+const total = computed(() => {
+  try {return each.value === null ? null : quoteTotal(each.value, isCollection.value ? quotedCount(quantity.value) : 1n)}
+  catch {return null}
+})
 const toWrap = computed(() => (total.value === null || wrapped.value === null ? null : total.value > wrapped.value ? total.value - wrapped.value : 0n))
 const short = computed(() => toWrap.value !== null && native.value !== null && toWrap.value > native.value)
 
 async function offer() {
-  const bidder = wallet.address as Address
-  const ex = exchange()
-  if (!bidder || !ex?.wrappedZnn || each.value === null || total.value === null) return
-  const n = BigInt(Math.max(1, quantity.value))
-  const label = isCollection.value
-    ? `Sign an offer of ${price.value} ZNN each for ${n} item${n === 1n ? '' : 's'}`
-    : `Sign an offer of ${price.value} ZNN for ${props.name}`
-  await market.run(() => offerFunding(bidder, total.value!), {
+  const bidder = wallet.address as Address, ex = exchange()
+  if (!bidder || !ex?.wrappedZnn || !price.value || market.busy.value) return
+  const draft = {collection: props.collection, tokenId: props.tokenId ?? null, price: price.value,
+    count: quantity.value, days: days.value, name: props.name, paymentToken: ex.wrappedZnn}
+  const read = () => ({endpoint: endpoint.rpc, chainId: endpoint.chainId, walletChainId: wallet.chainId,
+    owner: wallet.address, signer: wallet.address, provider: wallet.provider, exchange: exchange()?.address,
+    paymentToken: exchange()?.wrappedZnn,
+    selection: props.open ? props.collection.toLowerCase() + ':' + (props.tokenId ?? '*') : ''})
+  const captured = {...read(), owner: bidder, exchange: ex.address, paymentToken: draft.paymentToken,
+    selection: draft.collection.toLowerCase() + ':' + (draft.tokenId ?? '*')}
+  let prepared: {quote: ReturnType<typeof listingQuote>; count: bigint; guard: () => void} | null = null
+  await market.run(async () => {
+    const quote = listingQuote(draft.price, 'znn'), count = draft.tokenId ? 1n : quotedCount(draft.count)
+    const total = quoteTotal(quote.amount, count)
+    orderDuration(draft.days)
+    const guard = quoteContextGuard(read, captured)
+    prepared = {quote, count, guard}
+    const calls = await offerFunding(bidder, total)
+    guard()
+    return guardedQuoteCalls(calls, guard)
+  }, {
     sign: {
-      label,
+      label: draft.tokenId ? `Sign an offer of ${draft.price} ZNN for ${draft.name}` : `Sign an offer of ${draft.price} ZNN each for ${draft.count} items`,
       run: async () => {
-        const order = await newOrder(
-          {
-            side: BUY,
-            collection: props.collection as Address,
-            tokenId: isCollection.value ? 0n : BigInt(props.tokenId!),
-            anyToken: isCollection.value,
-            amount: isCollection.value ? n : 1n,
-            price: each.value!,
-            paymentToken: ex.wrappedZnn!,
-          },
-          days.value,
-        )
-        await submitOrders([await signOrder(order)])
+        if (!prepared) throw new Error('Review the offer before signing.')
+        const {quote, count, guard} = prepared
+        guard()
+        const order = await newOrder({side: BUY, collection: draft.collection as Address,
+          tokenId: draft.tokenId ? BigInt(draft.tokenId) : 0n, anyToken: !draft.tokenId,
+          amount: count, price: quote.amount, paymentToken: draft.paymentToken}, draft.days)
+        guard()
+        const input = await signOrder(order)
+        guard()
+        await submitOrders([input])
+        guard()
       },
     },
     success: 'Offer made. It stands until it is taken, it expires, or you cancel it.',
-    after: () => {
-      emit('done')
-      emit('close')
-    },
+    after: () => {emit('done'); emit('close')},
   })
 }
 </script>

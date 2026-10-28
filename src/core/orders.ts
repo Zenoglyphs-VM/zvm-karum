@@ -152,7 +152,15 @@ function randomSalt(): bigint {
  * An order from this wallet. It opens five minutes ago, so a clock a little
  * ahead of the chain's never makes a fresh listing "not yet open".
  */
+export function orderDuration(days: number): bigint {
+  const seconds = days * 86_400
+  if (typeof days !== 'number' || !Number.isFinite(days) || days <= 0 || !Number.isSafeInteger(seconds))
+    throw new Error('Choose a positive duration that is an exact whole number of seconds.')
+  return BigInt(seconds)
+}
+
 export async function newOrder(fields: Pick<Order, 'side' | 'collection' | 'tokenId' | 'price'> & Partial<Order>, days: number): Promise<Order> {
+  const duration = orderDuration(days), captured = {...fields}
   const {from} = signer()
   const now = BigInt(Math.floor(Date.now() / 1000))
   return {
@@ -161,10 +169,10 @@ export async function newOrder(fields: Pick<Order, 'side' | 'collection' | 'toke
     amount: 1n,
     paymentToken: ZERO as Address,
     listingTime: now - 300n,
-    expirationTime: now + BigInt(Math.round(days * 86_400)),
+    expirationTime: now + duration,
     nonce: await traderNonce(from),
     salt: randomSalt(),
-    ...fields,
+    ...captured,
   }
 }
 
