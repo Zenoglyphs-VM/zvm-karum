@@ -3,8 +3,8 @@ import {encodeFunctionData, parseAbi, type Address, type Hex} from 'viem'
 import type {Royalty, SaleHead, SaleSource} from './sale-proceeds'
 
 type SnapshotRequest =
-  | {method: 'eth_getBlockByNumber'; params: readonly [Hex | 'latest', false]}
-  | {method: 'eth_call'; params: readonly [{to: Address; data: Hex}, {blockHash: Hex; requireCanonical: true}]}
+  | {method: 'eth_getBlockByNumber'; params: [Hex | 'latest', false]}
+  | {method: 'eth_call'; params: [{to: Address; data: Hex}, {blockHash: Hex; requireCanonical: true}]}
 export type SnapshotRequestFn = (request: SnapshotRequest) => Promise<unknown>
 const ZERO = '0x0000000000000000000000000000000000000000' as Address
 const exchangeAbi = parseAbi([
