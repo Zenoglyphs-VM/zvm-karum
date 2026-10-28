@@ -10,19 +10,21 @@
 import {computed, ref, watch} from 'vue'
 import {type Address} from 'viem'
 import {endpoint} from '../core/endpoint'
-import {listingQuote, quotedAmount, relistingQuote, quoteContextGuard, guardedQuoteCalls} from '../core/order-quote'
+import {listingQuote, quotedAmount, quoteAmountText, relistingQuote, quoteContextGuard, guardedQuoteCalls} from '../core/order-quote'
 import {wallet} from '../core/wallet'
 import {publicClient} from '@zvm/web/evm'
 import {whole, units, usd} from '../core/format'
 import {usdOf} from '../core/prices'
-import {exchange, exchangeAbi, newOrder, orderDuration, SELL, signOrders, submitOrders} from '../core/orders'
-import {approvalFor, royaltyBps, useMarket} from '../core/market'
+import {exchange, newOrder, orderDuration, SELL, signOrders, submitOrders} from '../core/orders'
+import {approvalFor, useMarket} from '../core/market'
 import {burst} from '../core/burst'
 import Modal from './Modal.vue'
 import NftMedia from './NftMedia.vue'
 import StepRail from './StepRail.vue'
 import Icon from './Icon.vue'
 import type {Listable} from '../core/api'
+import {salePreview, type SalePreview, type SaleAmounts} from '../core/sale-proceeds'
+import {saleSource} from '../core/sale-proceeds-rpc'
 
 const props = defineProps<{open: boolean; items: Listable[]; floor?: number | null; current?: string | null; currentRaw?: string | null; currentCurrency?: string | null}>()
 const emit = defineEmits<{(e: 'close'): void; (e: 'done'): void}>()
@@ -31,8 +33,8 @@ const market = useMarket()
 const price = ref('')
 const currency = ref<'znn' | 'qsr'>('znn')
 const days = ref(30)
-const feeBps = ref<number | null>(null)
-const royalty = ref<number | null>(null)
+const proceedsState = ref<SalePreview>({status: 'idle', estimate: null})
+const proceedsReader = salePreview(value => {proceedsState.value = value})
 const button = ref<HTMLElement | null>(null)
 
 const DURATIONS = [
@@ -51,7 +53,7 @@ const collections = computed(() => [...new Map(props.items.map((i) => [i.collect
 
 watch(
   () => props.open,
-  async (open) => {
+  (open) => {
     if (!open) return
     market.reset()
     currency.value = 'znn'
@@ -63,15 +65,7 @@ watch(
         price.value = original.text
       } catch (err: any) {price.value = ''; market.error.value = err?.message ?? 'Review the original listing price.'}
     }
-    const ex = exchange()
-    if (!ex || endpoint.chainId === null) return
-    const first = props.items[0]
-    const [fee, roy] = await Promise.all([
-      publicClient(endpoint.chainId).readContract({address: ex.address, abi: exchangeAbi, functionName: 'feeBps'}).then(Number).catch(() => null),
-      first ? royaltyBps(first.collection as Address) : Promise.resolve(null),
-    ])
-    feeBps.value = fee
-    royalty.value = roy
+
   },
 )
 
@@ -84,11 +78,46 @@ const amount = computed(() => {
   }
 })
 
-const proceeds = computed(() => {
-  if (amount.value === null) return null
-  const cut = BigInt((feeBps.value ?? 0) + (royalty.value ?? 0))
-  return amount.value - (amount.value * cut) / 10_000n
-})
+watch(
+  () => [props.open, price.value, currency.value, qsr.value, endpoint.rpc, endpoint.chainId,
+    exchange()?.address, props.items.map(item => item.collection.toLowerCase() + ':' + item.tokenId).join(',')],
+  (_value, _before, onCleanup) => {
+    proceedsReader.clear()
+    const ex = exchange(), chainId = endpoint.chainId, quoted = amount.value
+    if (!props.open || !ex || chainId === null || quoted === null || !props.items.length) return
+    let disposed = false, timer: ReturnType<typeof setTimeout> | undefined
+    onCleanup(() => {disposed = true; clearTimeout(timer); proceedsReader.clear()})
+    try {
+      listingQuote(price.value, currency.value, qsr.value)
+      const client = publicClient(chainId)
+      const source = saleSource(request => client.request(request), ex.address)
+      const items = props.items.map(item => ({collection: item.collection as Address, tokenId: BigInt(item.tokenId)}))
+      const refresh = async () => {
+        if (disposed) return
+        await proceedsReader.load(source, items, quoted)
+        if (!disposed) timer = setTimeout(refresh, 15_000)
+      }
+      timer = setTimeout(refresh, 200)
+    } catch {proceedsState.value = {status: 'unavailable', estimate: null}}
+  },
+  {immediate: true, flush: 'sync'},
+)
+
+function amountRange(field: keyof SaleAmounts): {min: bigint; max: bigint} | null {
+  const estimate = proceedsState.value.estimate
+  if (proceedsState.value.status !== 'ready' || !estimate?.amounts.length) return null
+  let min = estimate.amounts[0][field], max = min
+  for (const item of estimate.amounts) {if (item[field] < min) min = item[field]; if (item[field] > max) max = item[field]}
+  return {min, max}
+}
+const proceeds = computed(() => amountRange('proceeds'))
+const royalty = computed(() => amountRange('royalty'))
+const fee = computed(() => amountRange('fee'))
+function rangeText(range: {min: bigint; max: bigint} | null): string {
+  if (!range) return proceedsState.value.status === 'loading' ? 'Loading' : 'Unavailable'
+  const min = quoteAmountText(range.min, decimals.value), max = quoteAmountText(range.max, decimals.value)
+  return (range.min === range.max ? min : min + ' - ' + max) + ' ' + symbol.value
+}
 
 const belowFloor = computed(() => {
   if (currency.value !== 'znn' || !props.floor || amount.value === null) return false
@@ -193,13 +222,18 @@ async function list() {
         </div>
       </div>
 
-      <dl class="grid gap-1.5 text-[13px] rounded-[8px] bg-sunk border border-line p-3">
-        <div class="flex justify-between"><dt class="text-dim">Listing price</dt><dd class="num">{{ amount !== null ? units(amount, decimals, 6) : '-' }} {{ symbol }}</dd></div>
-        <div class="flex justify-between"><dt class="text-dim">Creator royalty</dt><dd class="num">{{ royalty === null ? '-' : `${(royalty / 100).toFixed(2)}%` }}</dd></div>
-        <div class="flex justify-between"><dt class="text-dim">Marketplace fee</dt><dd class="num">{{ feeBps === null ? '-' : `${(feeBps / 100).toFixed(2)}%` }}</dd></div>
-        <div class="flex justify-between border-t border-line pt-1.5 mt-0.5 font-semibold">
-          <dt>You receive{{ many ? ' each' : '' }}</dt>
-          <dd class="num" style="color: var(--znn-ink)">{{ proceeds !== null ? units(proceeds, decimals, 6) : '-' }} {{ symbol }}</dd>
+      <dl class="grid gap-1.5 text-[13px] rounded-[8px] bg-sunk border border-line p-3"
+        data-testid="listing-proceeds" :data-state="proceedsState.status"
+        :data-price="proceedsState.estimate?.price.toString() ?? ''" :data-block="proceedsState.estimate?.head.hash ?? ''"
+        :data-proceeds-min="proceeds?.min.toString() ?? ''" :data-proceeds-max="proceeds?.max.toString() ?? ''"
+        :data-royalty-min="royalty?.min.toString() ?? ''" :data-royalty-max="royalty?.max.toString() ?? ''"
+        :data-fee-min="fee?.min.toString() ?? ''" :data-fee-max="fee?.max.toString() ?? ''">
+        <div class="flex justify-between gap-3"><dt class="text-dim">Listing price</dt><dd class="num text-right break-all max-w-[65%]">{{ amount !== null ? quoteAmountText(amount, decimals) + ' ' + symbol : '-' }}</dd></div>
+        <div class="flex justify-between gap-3"><dt class="text-dim">Creator royalty</dt><dd class="num text-right break-all max-w-[65%]">{{ rangeText(royalty) }}</dd></div>
+        <div class="flex justify-between gap-3"><dt class="text-dim">Marketplace fee</dt><dd class="num text-right break-all max-w-[65%]">{{ rangeText(fee) }}</dd></div>
+        <div class="flex justify-between gap-3 border-t border-line pt-1.5 mt-0.5 font-semibold">
+          <dt>Estimated proceeds{{ many ? ' each' : '' }}</dt>
+          <dd class="num text-right break-all max-w-[65%]" style="color: var(--znn-ink)">{{ rangeText(proceeds) }}</dd>
         </div>
       </dl>
 
