@@ -10,7 +10,9 @@
     "build": "vite build",
     "typecheck": "vue-tsc --noEmit",
     "preview": "vite preview",
-    "verify": "node scripts/verify.mjs"
+    "verify": "node scripts/verify.mjs",
+    "test:orders": "node --experimental-vm-modules --test test/order-*.test.mjs",
+    "verify:vectors": "node --experimental-vm-modules --test test/order-vectors.test.mjs"
   },
   "dependencies": {
     "@fontsource-variable/jetbrains-mono": "^5.2.5",

@@ -7,7 +7,7 @@
 // been ordered, and is waiting to be executed.
 
 import {reactive} from 'vue'
-import type {Address, Hash, Hex} from 'viem'
+import type {Address, Hash, Hex, TransactionReceipt} from 'viem'
 import {estimateFees, publicClient, walletClient} from '@zvm/web/evm'
 import {endpoint} from './endpoint'
 import {wallet} from './wallet'
@@ -17,6 +17,14 @@ export interface Call {
   to: Address
   data: Hex
   value: bigint
+  /** Recheck the selected account and node after asynchronous preparation. */
+  guard?: () => void
+  /** Synchronously retain recovery context immediately before a wallet request. */
+  onRequest?: () => void
+  /** Synchronously retain the wallet's exact hash before waiting for execution. */
+  onSubmitted?: (hash: string) => void
+  /** Distinguish failures before dispatch from an uncertain requested outcome. */
+  onFailed?: (error: unknown, requested: boolean) => void
   label: string
 }
 
@@ -33,6 +41,8 @@ export interface Step {
   state: StepState
   hash?: Hash
   detail?: string
+  /** The executed receipt, kept in memory for flow-specific reconciliation. */
+  receipt?: TransactionReceipt
   /** A signature step: it is never ordered or executed, only signed. */
   signature?: boolean
 }
@@ -83,23 +93,36 @@ export async function runCalls(calls: Call[], update: (steps: Step[]) => void, s
 
   for (const [i, call] of calls.entries()) {
     const step = steps[i]
+    let requested = false
     try {
+      call.guard?.()
       step.state = 'signing'
       emit()
       const [gas, fees] = await Promise.all([estimate(from, call), estimateFees(chainId)])
+      call.guard?.()
+      if (call.onRequest) {
+        call.onRequest()
+        call.guard?.()
+      }
+      requested = true
       const hash = await signer.sendTransaction({to: call.to, data: call.data, value: call.value, gas, ...fees})
       step.hash = hash
+      call.onSubmitted?.(hash)
       step.state = 'ordered'
       emit()
       record({hash, label: call.label, chainId, at: Date.now(), state: 'ordered'})
       const r = await client.waitForTransactionReceipt({hash, ...RECEIPT})
       if (r.status !== 'success') throw new Error('The ZVM reverted this transaction.')
+      step.receipt = r
       step.state = 'done'
       emit()
       record({hash, label: call.label, chainId, at: Date.now(), state: 'done'})
     } catch (err) {
       step.state = 'failed'
       step.detail = reason(err)
+      try {call.onFailed?.(err, requested)} catch {
+        step.detail += ' The recovery record could not be updated; keep any original transaction hash.'
+      }
       emit()
       if (step.hash) record({hash: step.hash, label: call.label, chainId, at: Date.now(), state: 'failed'})
       return steps

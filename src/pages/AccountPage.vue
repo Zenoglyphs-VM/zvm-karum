@@ -28,6 +28,8 @@ import Tabs from '../components/Tabs.vue'
 import ActivityList from '../components/ActivityList.vue'
 import ListDialog from '../components/ListDialog.vue'
 import StepRail from '../components/StepRail.vue'
+import CollectionPermissions from '../components/CollectionPermissions.vue'
+import ExchangeCredits from '../components/ExchangeCredits.vue'
 import Icon from '../components/Icon.vue'
 import Chip from '@zvm/web/components/Chip.vue'
 
@@ -225,6 +227,8 @@ const images = computed(() =>
 
     <p v-if="error" class="text-[13px]" style="color: var(--danger)">{{ error }}</p>
 
+    <ExchangeCredits :owner="address" />
+
     <Tabs v-model="tab" :tabs="tabs" />
 
     <StepRail :steps="market.steps.value" />
@@ -370,6 +374,9 @@ const images = computed(() =>
       </p>
       <button class="btn btn-sm" style="color: var(--danger)" :disabled="market.busy.value" @click="cancelEverything">Cancel all orders</button>
     </section>
+
+    <CollectionPermissions v-if="mine && account" :owner="account.address"
+      :collections="[...account.owned, ...account.openOrders]" @changed="load(true)" />
 
     <ListDialog :open="listing_" :items="toList" :floor="listFloor" @close="listing_ = false" @done="afterList" />
   </div>

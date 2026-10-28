@@ -2,10 +2,8 @@
 // many, how the node is handed them, and the exchange calls that fill and
 // cancel them.
 //
-// The hashing here is ZVMExchange's and zvm-node's orderbook's, and all three
-// are pinned by the same vectors in zvm-docs/spec/vectors.json. A struct field
-// out of order here produces a signature the node rejects as bad, which is the
-// failure to look for first if listing stops working after a contract change.
+// The canonical Go order vectors are checked directly by
+// `npm run verify:vectors` against the actual hashing and signing requests.
 
 import {concat, encodeFunctionData, hashStruct, keccak256, parseAbi, type Address, type Hex} from 'viem'
 import {api} from './api'
@@ -19,6 +17,7 @@ export const SELL = 0
 export const BUY = 1
 export const KIND_SINGLE = 0
 export const KIND_BULK = 1
+export const KIND_ONCHAIN = 2
 
 export interface Order {
   trader: Address
@@ -67,9 +66,13 @@ export const exchangeAbi = parseAbi([
   'function buyMany(Input[] sells) payable returns (uint256)',
   'function acceptBid(Input bid, uint256 tokenId)',
   'function cancelOrders(Order[] orders)',
+  'function approveOrders(Order[] orders)',
   'function incrementNonce()',
   'function nonces(address) view returns (uint256)',
+  'function checkOrder(Input input) view returns (uint8 code, uint256 remaining)',
   'function feeBps() view returns (uint256)',
+  'function credits(address) view returns (uint256)',
+  'function withdrawCredits()',
 ])
 
 export const erc20Abi = parseAbi([
@@ -112,6 +115,7 @@ function hashPair(a: Hex, b: Hex): Hex {
  * way the node's orderbook builds it: an odd node is carried up unhashed.
  */
 export function orderTree(leaves: Hex[]): {root: Hex; proofs: Hex[][]} {
+  if (leaves.length === 0) return {root: ('0x' + '0'.repeat(64)) as Hex, proofs: []}
   const proofs: Hex[][] = leaves.map(() => [])
   const pos = leaves.map((_, i) => i)
   let level = [...leaves]
@@ -148,7 +152,15 @@ function randomSalt(): bigint {
  * An order from this wallet. It opens five minutes ago, so a clock a little
  * ahead of the chain's never makes a fresh listing "not yet open".
  */
+export function orderDuration(days: number): bigint {
+  const seconds = days * 86_400
+  if (typeof days !== 'number' || !Number.isFinite(days) || days <= 0 || !Number.isSafeInteger(seconds))
+    throw new Error('Choose a positive duration that is an exact whole number of seconds.')
+  return BigInt(seconds)
+}
+
 export async function newOrder(fields: Pick<Order, 'side' | 'collection' | 'tokenId' | 'price'> & Partial<Order>, days: number): Promise<Order> {
+  const duration = orderDuration(days), captured = {...fields}
   const {from} = signer()
   const now = BigInt(Math.floor(Date.now() / 1000))
   return {
@@ -157,10 +169,10 @@ export async function newOrder(fields: Pick<Order, 'side' | 'collection' | 'toke
     amount: 1n,
     paymentToken: ZERO as Address,
     listingTime: now - 300n,
-    expirationTime: now + BigInt(Math.round(days * 86_400)),
+    expirationTime: now + duration,
     nonce: await traderNonce(from),
     salt: randomSalt(),
-    ...fields,
+    ...captured,
   }
 }
 
@@ -173,6 +185,7 @@ export async function signOrder(o: Order): Promise<Input> {
 
 /** Signs many orders with one prompt, over their Merkle root: Blur's bulk listing. */
 export async function signOrders(orders: Order[]): Promise<Input[]> {
+  if (orders.length === 0) return []
   if (orders.length === 1) return [await signOrder(orders[0])]
   const {from, client} = signer()
   const {root, proofs} = orderTree(orders.map(orderHash))
@@ -180,31 +193,59 @@ export async function signOrders(orders: Order[]): Promise<Input[]> {
   return orders.map((order, i) => ({order, kind: KIND_BULK, signature, proof: proofs[i]}))
 }
 
-const toWire = (o: Order) => ({
-  ...o,
-  tokenId: o.tokenId.toString(),
-  amount: o.amount.toString(),
-  price: o.price.toString(),
-  listingTime: Number(o.listingTime),
-  expirationTime: Number(o.expirationTime),
-  nonce: o.nonce.toString(),
-  salt: o.salt.toString(),
-})
+function orderUint(value: unknown, bits: number, field: string): bigint {
+  let result: bigint
+  if (typeof value === 'bigint') result = value
+  else if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value)) throw new Error(field + ': expected an exact safe integer')
+    result = BigInt(value)
+  } else if (typeof value === 'string' && /^[0-9]+$/.test(value) && value.length <= 78) result = BigInt(value)
+  else throw new Error(field + ': expected an unsigned decimal integer')
+  if (result < 0n || result >= (1n << BigInt(bits))) throw new Error(field + ': integer is out of range')
+  return result
+}
+
+function orderSide(value: unknown): number {
+  if (value !== SELL && value !== BUY) throw new Error('side: expected sell or buy')
+  return value
+}
+
+// Keep legacy safe numbers; decimal strings carry the rest of uint64 exactly.
+function wireTime(value: bigint, field: string): number | string {
+  const exact = orderUint(value, 64, field)
+  return exact <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(exact) : exact.toString()
+}
+
+const toWire = (value: Order) => {
+  const o = fromWire(value)
+  return {
+    ...o,
+    tokenId: o.tokenId.toString(),
+    amount: o.amount.toString(),
+    price: o.price.toString(),
+    listingTime: wireTime(o.listingTime, 'listingTime'),
+    expirationTime: wireTime(o.expirationTime, 'expirationTime'),
+    nonce: o.nonce.toString(),
+    salt: o.salt.toString(),
+  }
+}
 
 export function fromWire(o: any): Order {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) throw new Error('expected an order object')
+  if (typeof o.anyToken !== 'boolean') throw new Error('anyToken: expected a boolean')
   return {
     trader: o.trader,
-    side: Number(o.side),
+    side: orderSide(o.side),
     collection: o.collection,
-    tokenId: BigInt(o.tokenId),
-    anyToken: !!o.anyToken,
-    amount: BigInt(o.amount),
+    tokenId: orderUint(o.tokenId, 256, 'tokenId'),
+    anyToken: o.anyToken,
+    amount: orderUint(o.amount, 256, 'amount'),
     paymentToken: o.paymentToken,
-    price: BigInt(o.price),
-    listingTime: BigInt(o.listingTime),
-    expirationTime: BigInt(o.expirationTime),
-    nonce: BigInt(o.nonce),
-    salt: BigInt(o.salt),
+    price: orderUint(o.price, 256, 'price'),
+    listingTime: orderUint(o.listingTime, 64, 'listingTime'),
+    expirationTime: orderUint(o.expirationTime, 64, 'expirationTime'),
+    nonce: orderUint(o.nonce, 256, 'nonce'),
+    salt: orderUint(o.salt, 256, 'salt'),
   }
 }
 
